@@ -1,0 +1,106 @@
+name: Deploy Hindon River Sentinel to AWS (Tier 1)
+
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: hindon-river-backend
+
+jobs:
+  test:
+    name: Run Automated Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies & run pytest
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pytest backend/tests/ -v
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build Frontend
+        run: |
+          cd frontend
+          npm ci || npm install
+          npm run build
+
+  deploy-backend:
+    name: Build & Push Docker to ECR
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push backend image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          cd backend
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+  deploy-frontend:
+    name: Build & Deploy Frontend to S3 / CloudFront
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build Vite App
+        env:
+          VITE_API_BASE_URL: ${{ secrets.PROD_API_BASE_URL }}
+        run: |
+          cd frontend
+          npm ci || npm install
+          npm run build
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Sync static files to S3 & invalidate CloudFront
+        run: |
+          aws s3 sync frontend/dist/ s3://${{ secrets.S3_BUCKET_NAME }} --delete
+          if [ -n "${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}" ]; then
+            aws cloudfront create-invalidation --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} --paths "/*"
+          fi
