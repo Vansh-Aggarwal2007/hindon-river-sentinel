@@ -34,6 +34,15 @@ app.include_router(briefing_router)
 app.include_router(demo_router)
 
 
+@app.get("/")
+def root():
+    return {
+        "status": "healthy",
+        "service": "Hindon River Sentinel API",
+        "health": "/api/health"
+    }
+
+
 @app.get("/api/health")
 def health_check():
     return {
